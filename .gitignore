@@ -1,0 +1,4 @@
+# ISO trop lourdes pour GitHub (limite de 100 Mo par fichier)
+iso/
+*.iso
+*.iso.bz2
