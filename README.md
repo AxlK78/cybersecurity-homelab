@@ -2,7 +2,7 @@
 
 Journal de bord du lab : un nœud Proxmox VE avec une VM pare-feu OPNsense qui route et filtre six réseaux (un WAN et cinq zones internes). Le but final est d'avoir une machine attaquante, des cibles vulnérables (DVWA, bWAPP…), un Active Directory et un SIEM, chacun dans sa zone.
 
-> **État au 06/11/2026 :** OPNsense 26.7 est installé, ses six interfaces sont associées, le LAN (zone SIEM) est configuré en `10.10.10.1/24` et l'interface web est accessible par tunnel SSH. L'assistant de configuration web est en cours. Les zones OPT, le DHCP et les règles de pare-feu restent à faire.
+> **État au 13/11/2026 :** OPNsense 26.7 est installé et configuré (assistant terminé, snapshot `post-wizard`). Les six interfaces sont actives : LAN (SIEM) en `10.10.10.1/24` et les quatre zones OPT renommées et adressées. L'interface web est accessible par tunnel SSH, y compris à distance via Tailscale. Le DHCP des zones OPT et les règles de pare-feu restent à faire.
 
 ---
 
@@ -200,7 +200,7 @@ LAGG et VLAN : **non**. Le LAGG regroupe plusieurs liens physiques et le VLAN fa
 
 ![IP du LAN](screenshots/31-ip-lan.png)
 
-> **À corriger :** la réponse à « IPv6 via DHCP6 » était `y`. Ça demande au LAN d'obtenir son IPv6 comme **client** auprès d'un serveur DHCPv6, alors que dans la zone SIEM c'est OPNsense lui-même le serveur. Ça ne casse rien, mais c'est incohérent. Correction prévue dans *Interfaces → LAN → IPv6 Configuration Type : None*.
+> **Erreur (corrigée en section 11) :** la réponse à « IPv6 via DHCP6 » était `y`. Ça demande au LAN d'obtenir son IPv6 comme **client** auprès d'un serveur DHCPv6, alors que dans la zone SIEM c'est OPNsense lui-même le serveur. Ça ne casse rien, mais c'est incohérent.
 
 Ne pas confondre avec le **serveur** DHCP du LAN : là, OPNsense distribue les adresses aux VM de la zone.
 
@@ -233,6 +233,18 @@ L'interface web n'écoute que sur le LAN (`10.10.10.1`, dans `vmbr4`), et ce bri
    ```
 
    Aucune règle n'est ouverte sur le WAN : la seule porte d'entrée reste le SSH de Proxmox.
+
+### Depuis l'extérieur (Tailscale)
+
+L'hôte Proxmox est dans un tailnet Tailscale. Hors de chez moi, le même tunnel passe simplement par son nom Tailscale, toujours **depuis le PC** :
+
+```bash
+ssh -L 8443:10.10.10.1:443 root@pve
+```
+
+Proxmox reste joignable sur `https://pve:8006`. Rien n'est exposé sur Internet : ni ports ouverts sur la box ni règle sur le WAN d'OPNsense.
+
+À distance, deux choses à ne **pas** faire : modifier `vmbr0` (Tailscale passe par là, on perdrait l'accès) et changer l'IP du LAN d'OPNsense (le tunnel ne mènerait plus nulle part ; rattrapable par la console de la VM).
 
 > **Incident :** après *Edit → OK*, le ping répondait `Network is unreachable` et `vmbr4` n'avait aucune IP (capture `33`). Proxmox écrit d'abord les changements dans `/etc/network/interfaces.new` ; seul **Apply Configuration** les recopie dans `/etc/network/interfaces` et les applique. `ifreload -a` seul ne suffit pas, car il relit l'ancien fichier.
 >
@@ -294,9 +306,64 @@ La capture montre les valeurs par défaut, avant le décochage de *Multiwan*.
 
 Champs laissés vides : le mot de passe a déjà été changé en console, et c'est le même compte.
 
+Puis **Apply** pour terminer l'assistant.
+
+### Snapshot `post-wizard`
+
+Avant de toucher aux zones et aux règles, un snapshot Proxmox de la VM 100 : *VM 100 → Snapshots → Take Snapshot*, nom `post-wizard`, **RAM incluse**. Si une mauvaise règle coupe l'accès, on revient à cet état en un clic, sans réinstaller.
+
+![Snapshot post-wizard](screenshots/38-snapshot-post-wizard.png)
+
 ---
 
-## 11. Prochaines étapes (TODO)
+## 11. Correction de l'IPv6 du LAN
+
+Correction de l'erreur notée en section 8 : *Interfaces → [LAN] → IPv6 Configuration Type : **None***, puis *Save* et *Apply*. Le LAN n'essaie plus d'obtenir une IPv6 comme client DHCPv6. Le lab reste en IPv4 uniquement, ce qui simplifie les règles de pare-feu (une seule famille d'adresses à filtrer).
+
+![LAN IPv6 None](screenshots/39-lan-ipv6-none.png)
+
+---
+
+## 12. Configuration des zones OPT
+
+Après l'association (section 7), les OPT existent mais sont désactivées, sans IP ni nom parlant. Pour chacune : *Interfaces → [OPTx]*.
+
+| Champ | Valeur | Pourquoi |
+|-------|--------|----------|
+| Enable | coché | Sinon l'interface ne fait rien |
+| Description | nom de la zone | C'est le nom affiché partout (règles, DHCP, logs) : `ATTAQUE` se lit mieux que `OPT3` |
+| Block private networks | décoché | Ces zones **sont** des réseaux privés : cocher bloquerait tout leur trafic légitime |
+| Block bogon networks | décoché | Option prévue pour un WAN, inutile sur une zone interne |
+| IPv4 Configuration Type | Static IPv4 | OPNsense est la passerelle de la zone, son IP doit être fixe |
+| IPv6 Configuration Type | None | Lab en IPv4 uniquement |
+| IPv4 address | `10.10.X.1` / `24` | Toujours `.1`, comme pour le LAN |
+| IPv4 gateway rules | Disabled | **Aucune passerelle sur une interface interne** : sinon OPNsense la traiterait comme une sortie vers Internet (comme un WAN) et ajouterait du NAT et du *reply-to* |
+
+| Interface | vtnet | Description | IP |
+|-----------|-------|-------------|----|
+| OPT1 | vtnet1 | `SERVICES` | `10.10.40.1/24` |
+| OPT2 | vtnet2 | `AD_CLIENTS` | `10.10.50.1/24` |
+| OPT3 | vtnet3 | `ATTAQUE` | `10.10.20.1/24` |
+| OPT4 | vtnet5 | `DMZ` | `10.10.30.1/24` |
+
+*Save*, puis **Apply changes** en haut de la page : sans ce clic, la configuration est enregistrée mais pas appliquée.
+
+![OPT1 SERVICES](screenshots/40-opt1-services.png)
+![OPT3 ATTAQUE](screenshots/41-opt3-attaque.png)
+![OPT3 configuration générique](screenshots/42-opt3-generic-config.png)
+![OPT3 IP statique](screenshots/43-opt3-ip-statique.png)
+
+### Vérification
+
+*Interfaces → Overview* : les six interfaces sont *up* et chacune a son IP en `.1`. Le WAN a reçu `192.168.1.x` de la box par DHCP (plus une IPv6 publique, inutilisée par le lab). Le LAN n'a qu'une IPv6 *link-local* (`fe80::`), ce qui confirme que la correction de la section 11 a bien été appliquée.
+
+![Interfaces Overview](screenshots/44-interfaces-overview.png)
+
+Une fois activée, une OPT **bloque toujours tout** : contrairement au LAN, elle n'a aucune règle par défaut. Les VM de la zone n'iront nulle part tant que les règles de pare-feu ne sont pas écrites.
+
+---
+
+## 13. Prochaines étapes (TODO)
 
 ### OPNsense
 - [x] Retirer l'ISO et ajouter `net4` / `net5`
@@ -304,10 +371,10 @@ Champs laissés vides : le mot de passe a déjà été changé en console, et c'
 - [x] IP du LAN et serveur DHCP du LAN
 - [x] Changer le mot de passe root
 - [x] Accéder à l'interface web (tunnel SSH par l'hôte Proxmox)
-- [ ] Terminer l'assistant (*Apply*)
-- [ ] LAN : IPv6 Configuration Type → **None**
-- [ ] Renommer les OPT : `SERVICES`, `AD_CLIENTS`, `ATTAQUE`, `DMZ`
-- [ ] Donner leurs IP aux OPT : `10.10.40.1`, `10.10.50.1`, `10.10.20.1`, `10.10.30.1`
+- [x] Terminer l'assistant (*Apply*) et snapshot `post-wizard`
+- [x] LAN : IPv6 Configuration Type → **None**
+- [x] Activer, renommer et adresser les OPT (`SERVICES`, `AD_CLIENTS`, `ATTAQUE`, `DMZ`)
+- [x] Vérifier dans *Interfaces → Overview* que les 4 OPT sont *up* avec leur IP
 - [ ] Activer un serveur DHCP par zone (le DNS d'AD-Clients doit pointer vers le DC)
 - [ ] Règles de pare-feu entre les zones
 - [ ] Snapshot Proxmox de la VM « propre »
