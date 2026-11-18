@@ -2,7 +2,7 @@
 
 Journal de bord du lab : un nœud Proxmox VE avec une VM pare-feu OPNsense qui route et filtre six réseaux (un WAN et cinq zones internes). Le but final est d'avoir une machine attaquante, des cibles vulnérables (DVWA, bWAPP…), un Active Directory et un SIEM, chacun dans sa zone.
 
-> **État au 13/11/2026 :** OPNsense 26.7 est installé et configuré (assistant terminé, snapshot `post-wizard`). Les six interfaces sont actives : LAN (SIEM) en `10.10.10.1/24` et les quatre zones OPT renommées et adressées. L'interface web est accessible par tunnel SSH, y compris à distance via Tailscale. Le DHCP des zones OPT et les règles de pare-feu restent à faire.
+> **État au 18/11/2026 :** OPNsense 26.7 est installé et configuré (assistant terminé, snapshot `post-wizard`). Les six interfaces sont actives : LAN (SIEM) en `10.10.10.1/24` et les quatre zones OPT renommées et adressées. Chaque zone interne a son serveur DHCP (Dnsmasq). L'interface web est accessible par tunnel SSH, y compris à distance via Tailscale. Les règles de pare-feu restent à faire.
 
 ---
 
@@ -363,7 +363,50 @@ Une fois activée, une OPT **bloque toujours tout** : contrairement au LAN, elle
 
 ---
 
-## 13. Prochaines étapes (TODO)
+## 13. Serveurs DHCP des zones
+
+But : qu'une VM branchée dans une zone reçoive automatiquement une IP, sa passerelle (`10.10.X.1`) et un DNS. Jusqu'ici, seul le LAN avait un serveur DHCP (configuré en console, section 8).
+
+Sur OPNsense 26.7, le service DHCP par défaut est **Dnsmasq** : *Services → Dnsmasq DNS & DHCP*.
+
+### Interfaces
+
+Dans *General → Interface*, sélection du LAN et des quatre zones OPT. Le WAN n'en fait **pas** partie : OPNsense ne doit surtout pas distribuer d'adresses sur le réseau de la box.
+
+![Interfaces Dnsmasq](screenshots/45-dhcp-interfaces.png)
+
+### Plages
+
+Onglet *DHCP ranges*, une plage par zone. Même schéma partout : `.1` pour OPNsense, `.2` à `.99` pour les IP fixes (serveurs), `.100` à `.200` pour le DHCP.
+
+| Zone | Début | Fin |
+|------|-------|-----|
+| LAN (SIEM) | `10.10.10.100` | `10.10.10.200` |
+| SERVICES | `10.10.40.100` | `10.10.40.200` |
+| AD_CLIENTS | `10.10.50.100` | `10.10.50.200` |
+| ATTAQUE | `10.10.20.100` | `10.10.20.200` |
+| DMZ | `10.10.30.100` | `10.10.30.200` |
+
+Les autres champs restent par défaut : masque *automatic* (déduit de l'IP de l'interface, `/24`), bail de 86400 s (24 h), domaine hérité de la config générale (`lab.internal`).
+
+![Plage ATTAQUE](screenshots/46-dhcp-plage-attaque.png)
+![Plages DHCP](screenshots/48-dhcp-plages.png)
+
+> **Incident :** la première plage de la DMZ allait de `10.10.30.100` à `10.10.30.100` (capture `47`) : une faute de frappe qui ne laissait qu'**une seule adresse** à distribuer. La deuxième VM de la zone n'aurait reçu aucune IP. Corrigé en `10.10.30.200`.
+
+### Points à garder en tête
+
+- **Serveurs en IP fixe, hors plage.** Le contrôleur de domaine (`10.10.40.10` prévu) et le serveur Docker de la DMZ doivent avoir une adresse stable, sinon les règles de pare-feu qui les visent casseraient au renouvellement du bail.
+- **DNS d'AD_CLIENTS, à faire quand le DC existera.** Les postes Windows doivent utiliser le DC comme DNS, sinon ils ne trouvent pas le domaine et ne peuvent pas le rejoindre. Onglet *DHCP options* : interface `AD_CLIENTS`, option `dns-server` (6), valeur = IP du DC.
+- **DHCP ≠ connectivité.** Une VM recevra son IP, mais les OPT bloquent tout le reste : sans règle, pas de DNS (port 53 vers `10.10.X.1`) ni d'Internet. C'est l'étape suivante.
+
+### Vérification
+
+À faire avec la première VM d'une zone (Kali dans ATTAQUE) : elle doit apparaître dans *Services → Dnsmasq DNS & DHCP → Leases*.
+
+---
+
+## 14. Prochaines étapes (TODO)
 
 ### OPNsense
 - [x] Retirer l'ISO et ajouter `net4` / `net5`
@@ -375,7 +418,9 @@ Une fois activée, une OPT **bloque toujours tout** : contrairement au LAN, elle
 - [x] LAN : IPv6 Configuration Type → **None**
 - [x] Activer, renommer et adresser les OPT (`SERVICES`, `AD_CLIENTS`, `ATTAQUE`, `DMZ`)
 - [x] Vérifier dans *Interfaces → Overview* que les 4 OPT sont *up* avec leur IP
-- [ ] Activer un serveur DHCP par zone (le DNS d'AD-Clients doit pointer vers le DC)
+- [x] Activer un serveur DHCP par zone (Dnsmasq)
+- [ ] DHCP d'AD_CLIENTS : DNS → IP du DC (quand le DC sera installé)
+- [ ] Vérifier un bail DHCP avec une première VM
 - [ ] Règles de pare-feu entre les zones
 - [ ] Snapshot Proxmox de la VM « propre »
 
